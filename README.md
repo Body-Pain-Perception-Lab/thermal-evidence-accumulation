@@ -4,11 +4,7 @@
 
 This repository contains the analysis code and data for the paper "Evidence accumulation in temperature perception: Distinct effects of spatial summation and lateral inhibition". Which investigates spatial summation and lateral inhibition effects under different temporal conditions (dynamic thermal changes vs. fixed target temperatures).
 
-Larger model files are available via the corresponding OSF repository due to GitHub file size limitations. 
-
-This repository provides the analysis code and data supporting the published study on spatial summation and lateral inhibition effects in temperature perception under dynamic versus fixed temporal conditions.
-
-Larger model files are available via the corresponding OSF repository due to GitHub file size limitations.
+Larger model files are available via the corresponding OSF repository.
 
 Publication: Link forthcoming.
 
