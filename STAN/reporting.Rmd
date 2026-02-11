@@ -1,0 +1,44 @@
+---
+title: "Reporting"
+author: "Jesper Fischer Ehmsen "
+date: "02/10/2026"
+output:
+  pdf_document: default
+  html_document: default
+---
+# Load libraries and functions ß
+```{r setup, include=FALSE}
+# seed
+set.seed(1993)
+
+# Load required packages
+if (!requireNamespace("pacman", quietly = TRUE)) {
+  install.packages("pacman")
+}
+
+library("pacman")
+
+# Define path and data
+p_load(here, readr, tidyverse, dplyr, cmdstanr, posterior)
+
+# Visualization
+p_load(ggplot2, ggpubr, gghalves, ggrain, cowplot, scales, ggdist, ggthemes, ggblend, PupillometryR, magick,  kableExtra, webshot2, bayesplot)
+
+# Load required functions
+#source(here::here("Analysis","functions","effectsize_cohend.R"))
+source(here::here("Analysis","functions","utils.R"))
+source(here::here("STAN","scripts","reporting.R"))
+
+```
+
+
+# Please check the `source(here::here("STAN","scripts","reporting.R"))` script for a full list of estimates and to get a real sense of the comparisons!
+
+```{r}
+df = read.csv(here::here("Data","exp1.csv"))%>%
+  mutate(trial_index = row_number())
+
+qq = get_reporting(df)
+
+```
+

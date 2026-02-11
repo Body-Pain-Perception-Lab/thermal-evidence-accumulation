@@ -1,0 +1,106 @@
+---
+title: "Pipeline"
+author: "Camilla Eva Krænge"
+date: "3/13/2023"
+output:
+  pdf_document: default
+  html_document: default
+---
+This markdown was used to prepare the exp_1 tsv file with all the data used for further analyses and plotting. 
+
+Overview:
+- Load libraries and functions
+- Load data
+- Merge all tasks into one file 
+- Fix GUI recording errors 
+- Mark outlier response times and button press errors
+- Save data file for analysis 
+
+Load libraries and functions ##
+```{r load libraries, include=FALSE, warning = FALSE}
+# Ensure that pacman is installed
+if (!require("pacman")) {
+  install.packages("pacman")
+  library("pacman")
+}
+
+### PLEASE REMOVE LIBRARIES THAT ARE NOT NEEDED TO RUN THIS RMARKDOWN
+
+# Data Manipulation and Visualization
+p_load(tidyverse, dplyr)
+
+#Functions from GitHub
+source(here::here("Analysis","functions","load_data.R")) 
+
+source(here::here("Analysis","functions","clean_data.R")) 
+
+```
+
+#Experiment 1
+
+## Load data ## 
+Load  data for each task and save them into one data frame
+```{r load data for each task, include=FALSE, warning = FALSE}
+# Define BIDS directory 
+WD = getwd() # WD should point to BIDS folder
+
+#Load data for each task
+fast_ss = load_data(WD, 'FastSS')
+fast_li = load_data(WD, 'FastLI')
+slow_ss = load_data(WD, 'SlowSS')
+slow_li = load_data(WD, 'SlowLI')
+
+# Create one df with all task files in one data frame 
+df = rbind(fast_ss, fast_li, slow_ss, slow_li)
+
+# Merge distance_size and area_size into one column
+df$size <- coalesce(df$area_size, df$distance_size)
+
+# Add a trial rep counter 
+df <- df %>%
+  group_by(ID, task, size, quality) %>%
+  mutate(trial_rep = row_number()) %>% 
+  ungroup() %>% 
+  dplyr::rename(trial = ...1) 
+
+```
+
+Fix data recording GUI errors 
+list of errors:
+* ID 00 - FastSS marked as Pilot Y(N)
+* ID 01 - FastLI marked as age 21(26) and Pilot Y(N), gender F(M)
+* ID 04 - FastLI marked as Pilot Y(N) and FastSS age 21(28)
+* ID 14 - SlowSS marked as Pilot Y(N)
+* ID 15 - SlowSS marked as 25(27)
+
+```{r}
+df <- df %>% 
+  # Fix pilot error
+  mutate(pilot = ifelse(ID %in% c(0, 1, 4, 14), "N", pilot)) %>% 
+  
+  # Fix age errors
+  mutate(age = ifelse(ID %in% 1, 26, age)) %>% 
+  mutate(age = ifelse(ID %in% 4, 28, age)) %>% 
+  mutate(age = ifelse(ID %in% 15, 27, age)) %>% 
+  
+  # Fix gender error
+  mutate(gender = ifelse(ID %in% 1, 'M', gender)) %>% 
+  
+  # Fix F -> FALSE by chaning F to f and M to m, NB to nb 
+  mutate(gender = case_when(
+    gender == "M" ~ "m",
+    gender == "FALSE" ~ "f",
+    gender == "NB" ~ "nb",
+    TRUE ~ as.character(gender))) 
+```
+
+Find outlier response times (corresponding to responses that were more than 3 SD larger than the average)
+```{r Find outliers, include=FALSE, warning = FALSE}
+df = find_outliers(df, 0)
+```
+
+Save experiment 1 data in a csv file
+```{r}
+write.csv(df, here::here("Data","exp1.csv"), row.names=FALSE)
+```
+

@@ -1,0 +1,42 @@
+cff-version: 1.2.0
+message: "If you use this repository, please cite the associated paper (accepted in Cognition; not yet available online)."
+title: "Evidence accumulation in temperature perception: Distinct effects of spatial summation and lateral inhibition"
+type: software
+authors:
+  - family-names: "Krænge"
+    given-names: "Camilla E."
+  - family-names: "Ehmsen"
+    given-names: "Jesper F."
+  - family-names: "Courtin"
+    given-names: "Arthur S."
+  - family-names: "Brændholt"
+    given-names: "Malthe"
+  - family-names: "Allen"
+    given-names: "Micah G."
+  - family-names: "Fardo"
+    given-names: "Francesca"
+date-released: 2026-02-11
+repository-code: "https://github.com/Body-Pain-Perception-Lab/temp-evidence"
+url: "https://github.com/Body-Pain-Perception-Lab/temp-evidence"
+preferred-citation:
+  type: article
+  title: "Evidence accumulation in temperature perception: Distinct effects of spatial summation and lateral inhibition"
+  journal: "Cognition"
+  year: 2026
+  authors:
+    - family-names: "Krænge"
+      given-names: "Camilla E."
+    - family-names: "Ehmsen"
+      given-names: "Jesper F."
+    - family-names: "Courtin"
+      given-names: "Arthur S."
+    - family-names: "Brændholt"
+      given-names: "Malthe"
+    - family-names: "Allen"
+      given-names: "Micah G."
+    - family-names: "Fardo"
+      given-names: "Francesca"
+references:
+  - type: other
+    title: "OSF repository (models and large files)"
+    url: "https://osf.io/ev2mk/overview"

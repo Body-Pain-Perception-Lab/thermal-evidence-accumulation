@@ -1,0 +1,677 @@
+---
+title: "Posterior predictive plots"
+author: "Jesper Fischer Ehmsen"
+date: "10/02/2026"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Load libraries and functions
+
+```{r setup, include=FALSE}
+# seed
+set.seed(1993)
+
+# Load required packages
+if (!requireNamespace("pacman", quietly = TRUE)) {
+  install.packages("pacman")
+}
+
+library(pacman)
+ 
+# Define path and data
+p_load(here, readr, tidyverse, dplyr, posterior,purrr,tidyr,future,furrr)
+
+# Visualization
+p_load(ggplot2, ggpubr, gghalves, ggrain, cowplot, scales, ggdist, ggthemes, ggblend, PupillometryR, magick,  kableExtra, webshot2,ggh4x, bayesplot,patchwork, ggbreak)
+
+# Statistics  
+p_load(lmerTest, MuMIn, gamlss, devtools, glmmTMB, DHARMa, ggeffects, posterior, RWiener,brms)
+
+# Load required functions
+#source(here::here("Analysis","functions","effectsize_cohend.R"))
+source(here::here("Analysis","functions","utils.R"))
+source(here::here("STAN","scripts","plotting.R"))
+
+
+df = read.csv(here::here("Data","exp1.csv"))%>%
+  mutate(trial_index = row_number())
+
+SSLI_theme <- theme_classic() + 
+  theme(
+    text = element_text(size = 12), 
+    legend.position = "none",
+    axis.line = element_line(size = 1), 
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank(),
+    plot.background = element_rect(fill = "#FFFFFF", color = NA),
+    panel.background = element_rect(fill = "#FFFFFF", color = NA),
+    strip.background = element_rect(fill = "#FFFFFF", color = "#FFFFFF"), # White background and outline
+    strip.text = element_text(size = 12, face = "bold") # Optional, customize facet text
+  )
+
+#define plot colors 
+colors <- c("#83a6cd","#ffb755")
+
+```
+
+## predictive checks (SS)
+
+```{r}
+df_fastSS <- df %>% 
+  filter(outlier == 0, ID != 1) %>% 
+  group_by(ID, quality) %>%
+  filter(corrected_RT > 0.2) %>%
+  ungroup() %>% 
+  dplyr::select(ID,config,area_size,corrected_RT,quality,response_cw,rating,task,trial_index) %>% 
+  arrange(trial_index) %>% 
+  select(-trial_index) %>% 
+  drop_na()
+
+df_fastSS = df_fastSS %>% group_by(ID,quality,area_size) %>% mutate(rating_dif = rating-mean(rating)) %>% ungroup()
+df_fastSS = df_fastSS %>% mutate(quality = ifelse(quality == "cold","zcold","warm"))
+
+
+min_cold = as.matrix(df_fastSS %>% filter(quality == "zcold") %>% group_by(ID,task) %>% summarize(minrt = min(corrected_RT))  %>% ungroup() %>% select(task,minrt) %>% pivot_wider(names_from = "task",values_from = "minrt") %>% unnest())
+
+min_warm = as.matrix(df_fastSS %>% filter(quality == "warm") %>% group_by(ID,task) %>% summarize(minrt = min(corrected_RT))  %>% ungroup() %>% select(task,minrt) %>% pivot_wider(names_from = "task",values_from = "minrt") %>% unnest())
+
+fit_SS <- readRDS(here::here("STAN","taskmodels","fit_SS.rds"))
+
+# DEsign matrices
+X_alpha = model.matrix(~1+task, data = df_fastSS)
+X_tau = model.matrix(~0+quality*task, data = df_fastSS)
+X_deltas = c("~ 1 + area_size * quality * task + quality * rating_dif * task")
+X_betas = c("~ 1 + area_size * quality * task + quality * rating_dif * task")
+X_beta = model.matrix(as.formula(X_betas[1]), data = df_fastSS)
+X_delta = model.matrix(as.formula(X_deltas[1]), data = df_fastSS)
+names_delta = colnames(model.matrix(as.formula(X_deltas[1]), data = df_fastSS))
+names_beta = colnames(model.matrix(as.formula(X_betas[1]), data = df_fastSS))
+names_ndt = colnames(X_tau)
+
+# getting group level preditions and overlaying data.
+
+draws <- as_draws_df(fit_SS$draws("gm")) %>% 
+  select(-contains(".")) %>% 
+  rename_with(~c(
+    paste0("alpha_", colnames(X_alpha)),
+    paste0("beta_", names_delta),
+    paste0("delta_", names_delta),
+    paste0("ndt_", names_ndt)
+  )) %>% 
+  mutate(draw = 1:n())
+
+n_draws <- 20
+draws_subset <- draws %>% slice(1:n_draws)
+
+# Function to simulate RTs for a given draw
+simulate_rt_for_draw <- function(draw_row, draw_index) {
+  # extract current parameter vector
+  alpha_params <- as.numeric(draw_row[1:ncol(X_alpha)])
+  beta_params <- as.numeric(draw_row[(ncol(X_alpha) + 1):(ncol(X_alpha) + ncol(X_beta))])
+  delta_params <- as.numeric(draw_row[(ncol(X_alpha) + ncol(X_beta) + 1):(ncol(X_alpha) + ncol(X_beta) + ncol(X_delta))])
+  ndt_params   <- as.numeric(draw_row[(ncol(X_alpha) + ncol(X_beta) + ncol(X_delta) + 1):(ncol(X_alpha) + ncol(X_beta) + ncol(X_delta) + ncol(X_tau))])
+
+  ddm_params <- tibble(
+    alpha = exp(X_alpha %*% alpha_params),
+    beta  = brms::inv_logit_scaled(X_beta %*% beta_params),
+    delta = X_delta %*% delta_params,
+    untrans_tau = X_tau %*% ndt_params
+  ) %>%
+    rownames_to_column("trial") %>%
+    mutate(trial = as.numeric(trial))
+
+  sim_data <- inner_join(ddm_params, df_fastSS %>% mutate(trial = 1:n()), by = "trial") %>%
+    mutate(tau = case_when(
+      quality == "zcold" & task == "FastSS" ~ brms::inv_logit_scaled(untrans_tau) * mean(min_cold[, 1]),
+      quality == "zcold" & task == "SlowSS" ~ brms::inv_logit_scaled(untrans_tau) * mean(min_cold[, 2]),
+      quality == "warm"  & task == "FastSS" ~ brms::inv_logit_scaled(untrans_tau) * mean(min_warm[, 1]),
+      quality == "warm"  & task == "SlowSS" ~ brms::inv_logit_scaled(untrans_tau) * mean(min_warm[, 2]),
+      TRUE ~ NA_real_
+    )) %>%
+    rowwise() %>%
+    mutate(ddm_rt = rwiener(1, alpha, tau, beta, delta)$q,
+           draw = draw_index) %>%
+    ungroup()
+
+  return(sim_data)
+}
+
+
+# Set up parallel backend (adjust number of workers if needed)
+plan(multisession, workers = 10)  # Or use `multicore` on Unix systems
+
+# Then run the same code using `future_map2_dfr`
+simulated_rts <- future_map2_dfr(
+  .x = split(draws_subset, seq_len(nrow(draws_subset))),
+  .y = seq_len(nrow(draws_subset)),
+  .f = simulate_rt_for_draw,
+  .options = furrr_options(seed = TRUE)
+)
+
+
+# plotting for the Dynamic task
+
+grouplevel_dynamic = simulated_rts %>% filter(task == "FastSS") %>% 
+  ungroup() %>% mutate(ddm_rt = ifelse(response_cw == "cold",ddm_rt,-ddm_rt)) %>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))) %>% 
+  ggplot() +
+  geom_histogram(data = df_fastSS%>% filter(task == "FastSS")  %>% 
+                   ungroup() %>% mutate(corrected_RT = ifelse(response_cw == "cold",corrected_RT,-corrected_RT))%>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))),
+               aes(y = after_stat(density), x = corrected_RT, fill = response_cw,col = response_cw), bins = 50, show.legend = F)+
+  geom_line(
+    stat = "density",
+    aes(x = ddm_rt, group = interaction(draw, response_cw), color = response_cw),
+    alpha = 0.2,show.legend = F
+)+
+  scale_fill_manual("Response:",values = c('#83a6cd', '#ffb755'))+
+  scale_color_manual("Response:", values = c('#6e8bb1', '#e6a343'))+
+  scale_x_continuous(limits = c(-5,5), labels = c("-4","-2","0","2","4"), breaks = c(-4,-2,0,2,4))+
+  theme_classic()+
+  theme_classic()+
+  xlab("Response time (s)")+
+  ylab("")+
+  SSLI_theme+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ggtitle("Group-level")
+
+grouplevel_dynamic
+
+
+# and the static task
+
+grouplevel_target = simulated_rts %>% 
+  filter(task == "SlowSS") %>% 
+  ungroup() %>% mutate(ddm_rt = ifelse(response_cw == "cold",ddm_rt,-ddm_rt)) %>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))) %>% 
+  ggplot() +
+  geom_histogram(data = df_fastSS%>% filter(task == "SlowSS")  %>% 
+                   ungroup() %>% 
+                   mutate(corrected_RT = ifelse(response_cw == "cold",corrected_RT,-corrected_RT))%>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))),
+               aes(y = after_stat(density), x = corrected_RT, fill = response_cw,col = response_cw), bins = 70, show.legend = F)+
+  geom_line(
+    stat = "density",
+    aes(x = ddm_rt, group = interaction(draw, response_cw), color = response_cw),
+    alpha = 0.2,show.legend = F
+)+
+  #facet_wrap(~task, ncol = 1)+
+  scale_fill_manual("Response:",values = c('#83a6cd', '#ffb755'))+
+  scale_color_manual("Response:", values = c('#6e8bb1', '#e6a343'))+
+  scale_x_continuous(limits = c(-5,5), labels = c("-4","-2","0","2","4"), breaks = c(-4,-2,0,2,4))+
+  # xlim(c(-5,5))+
+  # scale_x_break(c(-1.9, 1.9), scales = 1) +
+  theme_classic()+
+  xlab("Response time (s)")+
+  ylab("")+
+  # labs(tag = "//") +
+  SSLI_theme+
+  # theme(plot.tag.position = c(0.527, 0.122))+
+  theme(plot.title = element_text(hjust = 0.5))+
+    ggtitle("Group-level")
+
+
+grouplevel_target
+
+```
+
+## Predictive checks for each subject
+
+```{r,fig.height=12,fig.width=12}
+
+pred_data = data.frame()
+ii = 0
+plots_dynamic = list()
+plots_target = list()
+
+## subject level predictive checks 
+dq_draw = sample(1:2000,20)
+
+for(s in unique(df_fastSS$ID)){
+  
+  ii = ii+1    
+  print(ii)
+  
+  
+  df1 = df_fastSS %>% 
+    mutate(trial_n = 1:n()) %>%
+    filter(ID == s)
+  
+  
+  df1 = df_fastSS %>% mutate(trial_n = 1:n()) %>% filter(ID == s)
+  
+  preds = extract_params(df1,fit_SS,dq_draw)
+  
+  
+  plot_subj = df1 %>% 
+    filter(task == "FastSS") %>% 
+    mutate(RT = ifelse(response_cw == "cold",corrected_RT,-corrected_RT),
+                             draw = NA,
+           ID = paste0("Sub: ",ID))  %>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))) %>% 
+    ggplot()+
+    geom_histogram(aes(y = after_stat(density), x = RT, fill = response_cw,col = response_cw), bins = 50)+
+    geom_line(
+      data = preds %>% filter(task == "FastSS") %>% 
+        mutate(pred_rt = ifelse(response_cw == "cold",pred_rt,-pred_rt)) %>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))),
+      stat = "density",
+      aes(x = pred_rt, group = interaction(draw, response_cw), color = response_cw),
+      alpha = 0.25
+    )+
+  # facet_wrap(~ID, ncol = 1)+
+  scale_fill_manual("Response:",values = c('#83a6cd', '#ffb755'))+
+  scale_color_manual("Response:", values = c('#6e8bb1', '#e6a343'))+
+  scale_x_continuous(limits = c(-5,5), labels = c("-4","-2","0","2","4"), breaks = c(-4,-2,0,2,4))+
+  theme_classic()+
+  SSLI_theme+
+  ggtitle(paste0("ID: ",unique(df1$ID)))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  if (ii %in% c(13, 14, 15)) {
+    x_lab = xlab("Response time (s)")
+  } else {
+    x_lab = xlab(NULL)
+  }
+  
+  plot_subj = plot_subj+
+  if (ii %in% c(1, 5, 9,13)) {
+    y_lab = ylab("Density")
+  } else {
+    y_lab = ylab(NULL)
+  }
+
+  
+  plots_dynamic[[ii]] = plot_subj
+  
+  plot_subj = df1 %>% 
+    filter(task == "SlowSS") %>% 
+    mutate(RT = ifelse(response_cw == "cold",corrected_RT,-corrected_RT),
+                             draw = NA,
+           ID = paste0("Sub: ",ID))%>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))) %>% 
+    ggplot()+
+    geom_histogram(aes(y = after_stat(density), x = RT, fill = response_cw,col = response_cw), bins = 50)+
+    geom_line(
+      data = preds %>% filter(task == "SlowSS") %>% 
+        mutate(pred_rt = ifelse(response_cw == "cold",pred_rt,-pred_rt))%>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA)))
+      ,
+      stat = "density",
+      aes(x = pred_rt, group = interaction(draw, response_cw), color = response_cw),
+      alpha = 0.25
+    )+
+  scale_fill_manual("Response:",values = c('#83a6cd', '#ffb755'))+
+  scale_color_manual("Response:", values = c('#6e8bb1', '#e6a343'))+
+      scale_x_continuous(limits = c(-5,5), labels = c("-4","-2","0","2","4"), breaks = c(-4,-2,0,2,4))+
+  theme_classic()+
+  SSLI_theme+
+  theme(plot.title = element_text(hjust = 0.5))+
+    ggtitle(paste0("ID: ",unique(df1$ID)))+
+      if (ii %in% c(13, 14, 15)) {
+    x_lab = xlab("Response time (s)")
+  } else {
+    x_lab = xlab(NULL)
+  }
+  
+  plot_subj = plot_subj+
+  if (ii %in% c(1, 5, 9,13)) {
+    y_lab = ylab("Density")
+  } else {
+    y_lab = ylab(NULL)
+  }
+
+
+  
+  
+  plots_target[[ii]] = plot_subj
+  
+  pred_data = rbind(pred_data, preds %>% mutate(ID = s))
+  
+}
+
+
+#dynamic
+plots_dynamic[[16]] = grouplevel_dynamic
+
+dyn_subj_pp = wrap_plots(plots_dynamic, ncol = 4)+
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+
+dyn_full_plot = dyn_subj_pp+
+  plot_annotation(title = "Posterior Predictive checks for Spatial Summation, Dynamic condition",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+  
+dyn_full_plot = dyn_full_plot&
+  theme(legend.position = "none")
+
+ggsave(here::here("Figures","PP_SS_dynamic.png"), dpi = 300,height = 7.2,width = 10)
+
+#target
+
+plots_target[[16]] = grouplevel_target
+
+tag_subj_pp = wrap_plots(plots_target, ncol = 4)+
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+
+tag_full_plot = tag_subj_pp+
+  plot_annotation(title = "Posterior Predictive checks for Spatial Summation, Target condition",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+  
+tag_full_plot
+
+
+ggsave(here::here("Figures","PP_SS_target.png"), dpi = 300,height = 7.2,width = 10)
+
+ggsave(here::here("Figures","PP_SS_target.tiff"), dpi = 300,height = 7.2,width = 10)
+```
+
+## predictive checks (LI)
+
+```{r}
+df_fastSS = df %>% 
+  filter(ID != 1) %>% 
+  group_by(ID, quality) %>%
+  filter(corrected_RT > 0.2) %>%        # ascending: fastest first
+  ungroup() %>% 
+  dplyr::select(ID,config,distance_size,corrected_RT,quality,response_cw,rating,task,trial_index) %>% 
+  arrange(trial_index) %>% 
+  select(-trial_index) %>% 
+  drop_na()
+
+df_fastSS = df_fastSS %>% group_by(ID,quality,distance_size) %>% mutate(rating_dif = rating-mean(rating)) %>% ungroup()
+df_fastSS = df_fastSS %>% mutate(quality = ifelse(quality == "cold","zcold","warm"))
+
+
+min_cold = as.matrix(df_fastSS %>% filter(quality == "zcold") %>% group_by(ID,task) %>% summarize(minrt = min(corrected_RT))  %>% ungroup() %>% select(task,minrt) %>% pivot_wider(names_from = "task",values_from = "minrt") %>% unnest())
+
+min_warm = as.matrix(df_fastSS %>% filter(quality == "warm") %>% group_by(ID,task) %>% summarize(minrt = min(corrected_RT))  %>% ungroup() %>% select(task,minrt) %>% pivot_wider(names_from = "task",values_from = "minrt") %>% unnest())
+
+
+fit_LI <- readRDS(here::here("STAN","taskmodels","fit_LI.rds"))
+
+# boundary separation
+X_alpha = model.matrix(~1+task, data = df_fastSS)
+
+
+# non-decision time
+X_tau = model.matrix(~0+quality*task, data = df_fastSS)
+
+
+X_deltas = c("~ 1 + distance_size * quality * task + quality * rating_dif * task")
+
+
+X_betas = c("~ 1 + distance_size * quality * task + quality * rating_dif * task")
+
+
+
+names_delta = colnames(model.matrix(as.formula(X_deltas[1]), data = df_fastSS))
+names_beta = colnames(model.matrix(as.formula(X_betas[1]), data = df_fastSS))
+names_ndt = colnames(X_tau)
+X_beta = model.matrix(as.formula(X_betas[1]), data = df_fastSS)
+X_delta = model.matrix(as.formula(X_deltas[1]), data = df_fastSS)
+
+
+draws <- as_draws_df(fit_LI$draws("gm")) %>% 
+  select(-contains(".")) %>% 
+  rename_with(~c(
+    paste0("alpha_", colnames(X_alpha)),
+    paste0("beta_", names_delta),
+    paste0("delta_", names_delta),
+    paste0("ndt_", names_ndt)
+  )) %>% 
+  mutate(draw = 1:n())
+
+n_draws <- 20
+draws_subset <- draws %>% slice(1:n_draws)
+
+# Function to simulate RTs for a given draw
+simulate_rt_for_draw <- function(draw_row, draw_index) {
+  # extract current parameter vector
+  alpha_params <- as.numeric(draw_row[1:ncol(X_alpha)])
+  beta_params <- as.numeric(draw_row[(ncol(X_alpha) + 1):(ncol(X_alpha) + ncol(X_beta))])
+  delta_params <- as.numeric(draw_row[(ncol(X_alpha) + ncol(X_beta) + 1):(ncol(X_alpha) + ncol(X_beta) + ncol(X_delta))])
+  ndt_params   <- as.numeric(draw_row[(ncol(X_alpha) + ncol(X_beta) + ncol(X_delta) + 1):(ncol(X_alpha) + ncol(X_beta) + ncol(X_delta) + ncol(X_tau))])
+
+  ddm_params <- tibble(
+    alpha = exp(X_alpha %*% alpha_params),
+    beta  = brms::inv_logit_scaled(X_beta %*% beta_params),
+    delta = X_delta %*% delta_params,
+    untrans_tau = X_tau %*% ndt_params
+  ) %>%
+    rownames_to_column("trial") %>%
+    mutate(trial = as.numeric(trial))
+
+  sim_data <- inner_join(ddm_params, df_fastSS %>% mutate(trial = 1:n()), by = "trial") %>%
+    mutate(tau = case_when(
+      quality == "zcold" & task == "FastLI" ~ brms::inv_logit_scaled(untrans_tau) * mean(min_cold[, 1]),
+      quality == "zcold" & task == "SlowLI" ~ brms::inv_logit_scaled(untrans_tau) * mean(min_cold[, 2]),
+      quality == "warm"  & task == "FastLI" ~ brms::inv_logit_scaled(untrans_tau) * mean(min_warm[, 1]),
+      quality == "warm"  & task == "SlowLI" ~ brms::inv_logit_scaled(untrans_tau) * mean(min_warm[, 2]),
+      TRUE ~ NA_real_
+    )) %>%
+    rowwise() %>%
+    mutate(ddm_rt = rwiener(1, alpha, tau, beta, delta)$q,
+           draw = draw_index) %>%
+    ungroup()
+
+  return(sim_data)
+}
+
+library(furrr)
+library(future)
+
+# Set up parallel backend (adjust number of workers if needed)
+plan(multisession, workers = 10)  # Or use `multicore` on Unix systems
+
+# Then run the same code using `future_map2_dfr`
+simulated_rts <- future_map2_dfr(
+  .x = split(draws_subset, seq_len(nrow(draws_subset))),
+  .y = seq_len(nrow(draws_subset)),
+  .f = simulate_rt_for_draw,
+  .options = furrr_options(seed = TRUE)
+)
+
+
+
+grouplevel_dynamic = simulated_rts %>% filter(task == "FastLI") %>% 
+  ungroup() %>% mutate(ddm_rt = ifelse(response_cw == "cold",ddm_rt,-ddm_rt)) %>% 
+  mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))) %>% 
+  ggplot() +
+  geom_histogram(data = df_fastSS%>% filter(task == "FastLI")  %>% 
+                   ungroup() %>% mutate(corrected_RT = ifelse(response_cw == "cold",corrected_RT,-corrected_RT)) %>% 
+                   mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))),
+               aes(y = after_stat(density), x = corrected_RT, fill = response_cw,col = response_cw), bins = 50, show.legend = F)+
+  geom_line(
+    stat = "density",
+    aes(x = ddm_rt, group = interaction(draw, response_cw), color = response_cw),
+    alpha = 0.2,show.legend = F
+)+
+  scale_fill_manual("Response:",values = c('#83a6cd', '#ffb755'))+
+  scale_color_manual("Response:", values = c('#6e8bb1', '#e6a343'))+
+  scale_x_continuous(limits = c(-5,5), labels = c("-4","-2","0","2","4"), breaks = c(-4,-2,0,2,4))+
+  theme_classic()+
+  theme_classic()+
+  xlab("Response time (s)")+
+  ylab("")+
+  SSLI_theme+
+  theme(plot.title = element_text(hjust = 0.5))+
+  ggtitle("Group-level")
+
+grouplevel_dynamic
+
+
+grouplevel_target = simulated_rts %>% filter(task == "SlowLI") %>% 
+  ungroup() %>% mutate(ddm_rt = ifelse(response_cw == "cold",ddm_rt,-ddm_rt)) %>% 
+  mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))) %>% 
+  ggplot() +
+  geom_histogram(data = df_fastSS%>% filter(task == "SlowLI")  %>% 
+                   ungroup() %>% mutate(corrected_RT = ifelse(response_cw == "cold",corrected_RT,-corrected_RT)) %>% 
+                   mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))),
+               aes(y = after_stat(density), x = corrected_RT, fill = response_cw,col = response_cw), bins = 70, show.legend = F)+
+  geom_line(
+    stat = "density",
+    aes(x = ddm_rt, group = interaction(draw, response_cw), color = response_cw),
+    alpha = 0.2,show.legend = F
+)+
+  scale_fill_manual("Response:",values = c('#83a6cd', '#ffb755'))+
+  scale_color_manual("Response:", values = c('#6e8bb1', '#e6a343'))+
+  scale_x_continuous(limits = c(-5,5), labels = c("-4","-2","0","2","4"), breaks = c(-4,-2,0,2,4))+
+  theme_classic()+
+  xlab("Response time (s)")+
+  ylab("")+
+  SSLI_theme+
+  theme(plot.title = element_text(hjust = 0.5))+
+    ggtitle("Group-level")
+
+
+grouplevel_target
+
+
+
+```
+
+
+## predictive checks for each subject (lateral inhibition)
+
+```{r,fig.height=12,fig.width=12}
+
+pred_data = data.frame()
+ii = 0
+plots_dynamic = list()
+plots_target = list()
+
+## subject level predictive checks 
+dq_draw = sample(1:2000,20)
+
+for(s in unique(df_fastSS$ID)){
+  
+  ii = ii+1    
+  print(ii)
+  
+  
+  df1 = df_fastSS %>% mutate(trial_n = 1:n()) %>% filter(ID == s)
+  
+  preds = extract_params(df1,fit_LI,dq_draw)
+  
+  plot_subj = df1 %>% filter(task == "FastLI") %>% 
+    mutate(RT = ifelse(response_cw == "cold",corrected_RT,-corrected_RT),
+                             draw = NA,
+           ID = paste0("Sub: ",ID))        %>% 
+    mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))) %>% 
+    ggplot()+
+    geom_histogram(aes(y = after_stat(density), x = RT, fill = response_cw,col = response_cw), bins = 50)+
+    geom_line(
+      data = preds %>% filter(task == "FastLI") %>% mutate(pred_rt = ifelse(response_cw == "cold",pred_rt,-pred_rt)) %>% 
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))),
+      stat = "density",
+      aes(x = pred_rt, group = interaction(draw, response_cw), color = response_cw),
+      alpha = 0.25
+    )+
+  # facet_wrap(~ID, ncol = 1)+
+  scale_fill_manual("Response:",values = c('#83a6cd', '#ffb755'))+
+  scale_color_manual("Response:", values = c('#6e8bb1', '#e6a343'))+
+  scale_x_continuous(limits = c(-5,5), labels = c("-4","-2","0","2","4"), breaks = c(-4,-2,0,2,4))+
+  theme_classic()+
+  SSLI_theme+
+  ggtitle(paste0("ID: ",unique(df1$ID)))+
+  theme(plot.title = element_text(hjust = 0.5))+
+  if (ii %in% c(13, 14, 15)) {
+    x_lab = xlab("Response time (s)")
+  } else {
+    x_lab = xlab(NULL)
+  }
+  
+  plot_subj = plot_subj+
+  if (ii %in% c(1, 5, 9,13)) {
+    y_lab = ylab("Density")
+  } else {
+    y_lab = ylab(NULL)
+  }
+
+  
+  
+  plots_dynamic[[ii]] = plot_subj
+  
+  plot_subj = df1 %>% filter(task == "SlowLI") %>% 
+    mutate(RT = ifelse(response_cw == "cold",corrected_RT,-corrected_RT),
+                             draw = NA,
+           ID = paste0("Sub: ",ID)) %>% 
+    mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))) %>% 
+    ggplot()+
+    geom_histogram(aes(y = after_stat(density), x = RT, fill = response_cw,col = response_cw), bins = 50)+
+    geom_line(
+      data = preds %>% filter(task == "SlowLI") %>% mutate(pred_rt = ifelse(response_cw == "cold",pred_rt,-pred_rt)) %>%        
+        mutate(response_cw = ifelse(response_cw == "cold","Cold",ifelse(response_cw == "warm","Warm",NA))),
+      stat = "density",
+      aes(x = pred_rt, group = interaction(draw, response_cw), color = response_cw),
+      alpha = 0.25
+    )+
+  scale_fill_manual("Response:",values = c('#83a6cd', '#ffb755'))+
+  scale_color_manual("Response:", values = c('#6e8bb1', '#e6a343'))+
+      scale_x_continuous(limits = c(-5,5), labels = c("-4","-2","0","2","4"), breaks = c(-4,-2,0,2,4))+
+  theme_classic()+
+  SSLI_theme+
+  theme(plot.title = element_text(hjust = 0.5))+
+    ggtitle(paste0("ID: ",unique(df1$ID)))+
+      if (ii %in% c(13, 14, 15)) {
+    x_lab = xlab("Response time (s)")
+  } else {
+    x_lab = xlab(NULL)
+  }
+  
+  plot_subj = plot_subj+
+  if (ii %in% c(1, 5, 9,13)) {
+    y_lab = ylab("Density")
+  } else {
+    y_lab = ylab(NULL)
+  }
+  
+  plots_target[[ii]] = plot_subj
+  
+  pred_data = rbind(pred_data, preds %>% mutate(ID = s))
+  
+}
+
+
+#dynamic
+plots_dynamic[[16]] = grouplevel_dynamic
+
+dyn_subj_pp = wrap_plots(plots_dynamic, ncol = 4)+
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+
+dyn_full_plot = dyn_subj_pp+
+  plot_annotation(title = "Posterior Predictive checks for Lateral Inhibition, Dynamic condition",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+  
+dyn_full_plot = dyn_full_plot&
+  theme(legend.position = "none")
+
+ggsave(here::here("Figures","PP_LI_dynamic.png"), dpi = 300,height = 7.2,width = 10)
+#target
+plots_target[[16]] = grouplevel_target
+
+tag_subj_pp = wrap_plots(plots_target, ncol = 4)+
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+
+tag_full_plot = tag_subj_pp+
+  plot_annotation(title = "Posterior Predictive checks for Lateral Inhibition, Target condition",
+                  theme = theme(plot.title = element_text(hjust = 0.5)))
+  
+tag_full_plot
+
+
+ggsave(here::here("Figures","PP_LI_target.png"), dpi = 300,height = 7.2,width = 10)
+ggsave(here::here("Figures","PP_LI_target.tiff"), dpi = 300,height = 7.2,width = 10)
+
+```

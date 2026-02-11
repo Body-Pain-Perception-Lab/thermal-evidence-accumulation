@@ -1,0 +1,10 @@
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+.DS_Store
+discarded/
+STAN/allmodels/
+STAN/discarded/
+STAN/taskmodels/
+osf/

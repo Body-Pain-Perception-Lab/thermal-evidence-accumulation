@@ -1,0 +1,781 @@
+---
+title: "Plotting marginal posterior means"
+author: "Jesper Fischer Ehmsen"
+date: "10/02/2026"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+# Load libraries and functions
+```{r setup, include=FALSE}
+# seed
+set.seed(1993)
+
+# Load required packages
+if (!requireNamespace("pacman", quietly = TRUE)) {
+  install.packages("pacman")
+}
+
+library("pacman")
+ 
+# Define path and data
+p_load(here, readr, tidyverse, dplyr, posterior)
+
+# Visualization
+p_load(ggplot2, ggpubr, gghalves, ggrain, cowplot, scales, ggdist, ggthemes, ggblend, PupillometryR, magick,  kableExtra, webshot2, bayesplot,patchwork,grid)
+
+# Statistics  
+p_load(lmerTest, MuMIn, gamlss, devtools, glmmTMB, DHARMa, ggeffects, posterior)
+
+# Load required functions
+#source(here::here("Analysis","functions","effectsize_cohend.R"))
+source(here::here("Analysis","functions","utils.R"))
+#source("/Users/au536872/Downloads/Analysis/functions/utils.R")
+
+source(here::here("STAN","scripts","plotting.R"))
+#source("/Users/au536872/Downloads/STAN/scripts/plotting.R")
+
+
+df = read.csv(here::here("Data","exp1.csv"))%>%
+  mutate(trial_index = row_number())
+
+```
+
+
+# theme 
+```{r}
+# Define common aesthetic settings
+SSLI_theme <- theme_classic() + 
+  theme(
+    text = element_text(size = 12), 
+    legend.position = "none",
+    axis.line = element_line(size = 1), 
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank(),
+    plot.background = element_rect(fill = "#FFFFFF", color = NA),
+    panel.background = element_rect(fill = "#FFFFFF", color = NA),
+    strip.background = element_rect(fill = "#FFFFFF", color = "#FFFFFF"), # White background and outline
+    strip.text = element_text(size = 12, face = "bold") # Optional, customize facet text
+  )
+
+#define plot colors 
+colors <- c("#83a6cd","#ffb755")
+```
+
+
+# Plotting for Spatial Summation
+
+```{r}
+df_fastSS = df %>% 
+  filter(ID != 1) %>% 
+  group_by(ID, quality) %>%
+  filter(corrected_RT > 0.2) %>%        # ascending: fastest first
+  ungroup() %>% 
+  dplyr::select(ID,config,area_size,corrected_RT,quality,response_cw,rating,task,trial_index) %>% 
+  arrange(trial_index) %>% 
+  select(-trial_index) %>% 
+  drop_na()
+
+df_fastSS = df_fastSS %>% group_by(ID,quality,area_size) %>% mutate(rating_dif = rating-mean(rating)) %>% ungroup()
+df_fastSS = df_fastSS %>% mutate(quality = ifelse(quality == "cold","zcold","warm"))
+
+
+min_cold = as.matrix(df_fastSS %>% filter(quality == "zcold") %>% group_by(ID,task) %>% summarize(minrt = min(corrected_RT))  %>% ungroup() %>% select(task,minrt) %>% pivot_wider(names_from = "task",values_from = "minrt") %>% unnest())
+min_warm = as.matrix(df_fastSS %>% filter(quality == "warm") %>% group_by(ID,task) %>% summarize(minrt = min(corrected_RT))  %>% ungroup() %>% select(task,minrt) %>% pivot_wider(names_from = "task",values_from = "minrt") %>% unnest())
+
+
+fit_SS <- readRDS(here::here("STAN","taskmodels","fit_SS.rds"))
+# fit_SS <- readRDS(here::here("discarded","fit_SS_v2.rds"))
+
+
+
+# boundary separation
+X_alpha = model.matrix(~1+task, data = df_fastSS)
+# non-decision time
+X_tau = model.matrix(~0+quality*task, data = df_fastSS)
+X_deltas = c("~ 1 + area_size * quality * task + quality * rating_dif * task")
+X_betas = c("~ 1 + area_size * quality * task + quality * rating_dif * task")
+
+names_delta = colnames(model.matrix(as.formula(X_deltas[1]), data = df_fastSS))
+names_beta = colnames(model.matrix(as.formula(X_betas[1]), data = df_fastSS))
+names_ndt = colnames(X_tau)
+
+
+#extract draws
+  
+delta_draws <- as_draws_df(fit_SS$draws("gm")) %>% 
+  select(-contains(".")) %>% 
+  rename_with(~c(
+    paste0("alpha_", colnames(X_alpha)),
+    paste0("beta_", names_beta),
+    paste0("delta_", names_delta),
+    paste0("ndt_", names_ndt)
+  )) %>% 
+  select(starts_with("delta_")) %>% 
+  as.matrix()  # dim: [4000 x K]
+
+
+#design matrix
+
+X_delta = data.frame(model.matrix(as.formula(X_deltas[1]), data = df_fastSS %>% 
+                                    select(area_size,quality,task) %>% distinct() %>% 
+                                    mutate(rating_dif = list(c(0,1))) %>% unnest()))
+  
+#trial-wise predictions
+
+b = as.matrix(X_delta) %*% t(delta_draws) 
+
+b_long <- as.data.frame(b) %>%
+  mutate(obs_id = row_number()) %>%
+  pivot_longer(
+    cols = -obs_id,
+    names_to = "draw",
+    values_to = "prediction"
+  )
+
+
+b_long$draw <- as.integer(gsub("V", "", b_long$draw))
+
+conditions <- df_fastSS %>%
+  select(area_size, quality, task) %>%
+  distinct() %>%
+  mutate(rating_dif = list(c(0,1))) %>% unnest() %>% 
+  mutate(obs_id = row_number())
+
+#combine with data and plot the effect of spatial summation on the drift rates for modality by task
+
+ss_drift = b_long %>%
+  left_join(conditions, by = "obs_id") %>% 
+  filter(rating_dif == 0 & (area_size == 1 | area_size == 2)) %>% select(-c(obs_id,rating_dif)) %>% 
+      pivot_wider(names_from = c(quality,area_size,task), values_from = prediction) %>% 
+  mutate(warm_fast = warm_2_FastSS - warm_1_FastSS,
+         warm_slow = warm_2_SlowSS - warm_1_SlowSS,
+         cold_fast = zcold_2_FastSS - zcold_1_FastSS,
+         cold_slow = zcold_2_SlowSS - zcold_1_SlowSS) %>% 
+  select(warm_fast,warm_slow,cold_fast,cold_slow,draw) %>% 
+  pivot_longer(
+    cols = -draw,
+    names_to = c("stimulus", "task"),
+    names_pattern = "(warm|cold)_(fast|slow)",
+    values_to = "value"
+  ) %>% 
+  mutate(task = recode(task, fast = "Dynamic", slow = "Target")) %>% 
+  ggplot(aes(x = value, fill = stimulus, color = stimulus))+
+    geom_histogram(alpha =0.5, position = "identity")+
+  geom_vline(xintercept = 0, linetype = 2)+
+    scale_fill_manual(values = c('#83a6cd', '#ffb755'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+    scale_color_manual(values = c('#5f7ea0', '#cc8f3f'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_x_continuous(
+  breaks = c(-0.4, 0, 0.4),
+  labels = function(x) ifelse(x == 0, "0", format(x, trim = TRUE)))+
+  SSLI_theme +
+  facet_wrap(~task,ncol = 1, strip.position = "left")+
+
+  xlab("Area (v)") +
+  ylab(" ")+
+  theme(
+      strip.background = element_blank(),
+      #strip.text = element_blank(),
+      panel.spacing = unit(0, "lines"),
+      strip.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        #axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    
+    )
+
+#combine with data and plot the effect of ratings on the drift rates for modality by task
+
+rat_drift = b_long %>%
+  left_join(conditions, by = "obs_id") %>% 
+  filter(area_size == 1 & (rating_dif == 0 | rating_dif == 1)) %>% select(-c(obs_id,area_size)) %>% 
+      pivot_wider(names_from = c(quality,rating_dif,task), values_from = prediction) %>% 
+  mutate(warm_fast = warm_1_FastSS - warm_0_FastSS,
+         warm_slow = warm_1_SlowSS - warm_0_SlowSS,
+         cold_fast = zcold_1_FastSS - zcold_0_FastSS,
+         cold_slow = zcold_1_SlowSS - zcold_0_SlowSS) %>% 
+  select(warm_fast,warm_slow,cold_fast,cold_slow,draw) %>% 
+  pivot_longer(
+    cols = -draw,
+    names_to = c("stimulus", "task"),
+    names_pattern = "(warm|cold)_(fast|slow)",
+    values_to = "value"
+  ) %>% 
+  ggplot(aes(x = value, fill = stimulus, color = stimulus))+  
+  geom_histogram(alpha =0.5, position = "identity")+
+  geom_vline(xintercept = 0, linetype = 2)+
+    scale_fill_manual(values = c('#83a6cd', '#ffb755'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+    scale_color_manual(values = c('#5f7ea0', '#cc8f3f'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  SSLI_theme +
+  # facet_wrap(~task,ncol = 1, scales = "free_x")+
+  facet_wrap(~task,ncol = 1, strip.position = "left")+
+  xlab("Rating (v)")+
+  ylab(" ")+ 
+  scale_x_continuous(
+  breaks = c(-0.03, 0, 0.03),
+  labels = function(x) ifelse(x == 0, "0", format(x, trim = TRUE))) + 
+  theme(
+      strip.background = element_blank(),
+      strip.text = element_blank(),
+      panel.spacing = unit(0, "lines"),
+      strip.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    
+    )
+
+
+# Same as above but for the bias
+
+beta_draws <- as_draws_df(fit_SS$draws("gm")) %>% 
+  select(-contains(".")) %>% 
+  rename_with(~c(
+    paste0("alpha_", colnames(X_alpha)),
+    paste0("beta_", names_beta),
+    paste0("delta_", names_delta),
+    paste0("ndt_", names_ndt)
+  )) %>% 
+  select(starts_with("beta_")) %>% 
+  as.matrix()  # dim: [4000 x K]
+
+
+
+X_beta = data.frame(model.matrix(as.formula(X_betas[1]), data = df_fastSS %>% 
+                                    select(area_size,quality,task) %>% distinct() %>% 
+                                    mutate(rating_dif = list(c(0,1))) %>% unnest()))
+
+
+
+
+# Same as above but for the bias
+
+beta_draws <- as_draws_df(fit_SS$draws("gm")) %>% 
+  select(-contains(".")) %>% 
+  rename_with(~c(
+    paste0("alpha_", colnames(X_alpha)),
+    paste0("beta_", names_beta),
+    paste0("delta_", names_delta),
+    paste0("ndt_", names_ndt)
+  )) %>% 
+  select(starts_with("beta_")) %>% 
+  as.matrix()  # dim: [4000 x K]
+
+
+
+X_beta = data.frame(model.matrix(as.formula(X_betas[1]), data = df_fastSS %>% 
+                                    select(area_size,quality,task) %>% distinct() %>% 
+                                    mutate(rating_dif = list(c(0,1))) %>% unnest()))
+
+
+
+b = as.matrix(X_beta) %*% t(beta_draws) 
+
+b_long <- as.data.frame(b) %>%
+  mutate(obs_id = row_number()) %>%
+  pivot_longer(
+    cols = -obs_id,
+    names_to = "draw",
+    values_to = "prediction"
+  )
+
+
+b_long$draw <- as.integer(gsub("V", "", b_long$draw))
+
+
+
+conditions <- df_fastSS %>%
+  select(area_size, quality, task) %>%
+  distinct() %>%
+  mutate(rating_dif = list(c(0,1))) %>% unnest() %>% 
+  mutate(obs_id = row_number())
+
+
+
+ss_bias = b_long %>%
+  left_join(conditions, by = "obs_id") %>% 
+    filter(rating_dif == 0 & (area_size == 1 | area_size == 2)) %>% select(-c(obs_id,rating_dif)) %>% 
+      pivot_wider(names_from = c(quality,area_size,task), values_from = prediction) %>% 
+  mutate(warm_fast = warm_2_FastSS - warm_1_FastSS,
+         warm_slow = warm_2_SlowSS - warm_1_SlowSS,
+         cold_fast = zcold_2_FastSS - zcold_1_FastSS,
+         cold_slow = zcold_2_SlowSS - zcold_1_SlowSS) %>% 
+  select(warm_fast,warm_slow,cold_fast,cold_slow,draw) %>% 
+  pivot_longer(
+    cols = -draw,
+    names_to = c("stimulus", "task"),
+    names_pattern = "(warm|cold)_(fast|slow)",
+    values_to = "value"
+  ) %>% 
+  ggplot(aes(x = value, fill = stimulus, color = stimulus))+
+    geom_histogram(alpha =0.5, position = "identity")+
+  geom_vline(xintercept = 0, linetype = 2)+
+    scale_fill_manual(values = c('#83a6cd', '#ffb755'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+    scale_color_manual(values = c('#5f7ea0', '#cc8f3f'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_x_continuous(
+  breaks = c(-0.1, 0, 0.1),
+  labels = function(x) ifelse(x == 0, "0", format(x, trim = TRUE))) + 
+  SSLI_theme +
+  # facet_wrap(~task,ncol = 1, scales = "free_x")+
+  facet_wrap(~task,ncol = 1, strip.position = "left")+
+  xlab("Area (z)")+
+  ylab(" ")+ theme(
+      strip.background = element_blank(),
+      strip.text = element_blank(),
+      panel.spacing = unit(0, "lines"),
+      strip.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    
+    )
+
+
+
+
+rat_bias = b_long %>%
+  left_join(conditions, by = "obs_id") %>% 
+  filter(area_size == 1 & (rating_dif == 0 | rating_dif == 1)) %>% select(-c(obs_id,area_size)) %>% 
+      pivot_wider(names_from = c(quality,rating_dif,task), values_from = prediction) %>% 
+  mutate(warm_fast = warm_1_FastSS - warm_0_FastSS,
+         warm_slow = warm_1_SlowSS - warm_0_SlowSS,
+         cold_fast = zcold_1_FastSS - zcold_0_FastSS,
+         cold_slow = zcold_1_SlowSS - zcold_0_SlowSS) %>% 
+  select(warm_fast,warm_slow,cold_fast,cold_slow,draw) %>% 
+  pivot_longer(
+    cols = -draw,
+    names_to = c("stimulus", "task"),
+    names_pattern = "(warm|cold)_(fast|slow)",
+    values_to = "value"
+  ) %>% 
+  mutate(task = recode(task, fast = "Dynamic", slow = "Target")) %>% 
+  ggplot(aes(x = value, fill = stimulus, color = stimulus))+
+  geom_histogram(alpha =0.5, position = "identity")+
+  geom_vline(xintercept = 0, linetype = 2)+
+  scale_fill_manual(values = c('#83a6cd', '#ffb755'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_color_manual(values = c('#5f7ea0', '#cc8f3f'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_x_continuous(
+  breaks = c(-0.02, 0, 0.02),
+  labels = function(x) ifelse(x == 0, "0", format(x, trim = TRUE))) + 
+  SSLI_theme +
+  # facet_wrap(~task,ncol = 1, scales = "free_x")+
+  facet_grid(task~1, scales = "free_x")+
+
+  xlab("Rating (z)")+
+  ylab(" ")+
+  theme(strip.text.x = element_blank(),
+      strip.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    )
+
+
+
+combined <- ((ss_drift + rat_drift) | (ss_bias + rat_bias)) +
+  plot_layout(guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    panel.spacing = unit(0, "lines")  # remove space between panels
+  )
+
+
+left_labels <- textGrob(
+  label = c("Dynamic", "Target"),
+  x = unit(0.7, "npc"),    
+  y = unit(c(0.85, 0.35), "npc"),
+  just = "right",
+  rot = 90,
+  gp = gpar(fontsize = 14, fontface = "bold")
+)
+
+final_plot <- wrap_elements(left_labels) + combined + 
+  plot_layout(ncol = 2, widths = c(0.06, 0.94))  # tweak widths as needed
+
+final_plot
+
+ggsave(here::here("Figures","png","F5_spatial_summation.png"),
+       plot = final_plot,
+       width = 180/25.4,  # inches
+       height = 150/25.4, # inches
+       units = "in",
+       dpi = 600)
+
+ggsave(here::here("Figures","tiff","F5_spatial_summation.tiff"),
+       plot = final_plot,
+       width = 180/25.4,  # inches
+       height = 150/25.4, # inches
+       units = "in",
+       dpi = 600)
+
+```
+
+# lateral inhibition
+
+# Here we do the same as for the spatial summation case
+
+```{r, fig.width=10,fig.height=6}
+df_fastSS = df %>% 
+  filter(ID != 1) %>% 
+  group_by(ID, quality) %>%
+  filter(corrected_RT > 0.2) %>%        # ascending: fastest first
+  ungroup() %>% 
+  dplyr::select(ID,config,distance_size,corrected_RT,quality,response_cw,rating,task,trial_index) %>% 
+  arrange(trial_index) %>% 
+  select(-trial_index) %>% 
+  drop_na()
+
+df_fastSS = df_fastSS %>% group_by(ID,quality,distance_size) %>% mutate(rating_dif = rating-mean(rating)) %>% ungroup()
+df_fastSS = df_fastSS %>% mutate(quality = ifelse(quality == "cold","zcold","warm"))
+
+
+min_cold = as.matrix(df_fastSS %>% filter(quality == "zcold") %>% group_by(ID,task) %>% summarize(minrt = min(corrected_RT))  %>% ungroup() %>% select(task,minrt) %>% pivot_wider(names_from = "task",values_from = "minrt") %>% unnest())
+min_warm = as.matrix(df_fastSS %>% filter(quality == "warm") %>% group_by(ID,task) %>% summarize(minrt = min(corrected_RT))  %>% ungroup() %>% select(task,minrt) %>% pivot_wider(names_from = "task",values_from = "minrt") %>% unnest())
+
+
+fit_LI <- readRDS(here::here("STAN","taskmodels","fit_LI.rds"))
+
+# boundary separation
+X_alpha = model.matrix(~1+task, data = df_fastSS)
+
+
+# non-decision time
+X_tau = model.matrix(~0+quality*task, data = df_fastSS)
+
+
+X_deltas = c("~ 1 + distance_size * quality * task + quality * rating_dif * task")
+
+
+X_betas = c("~ 1 + distance_size * quality * task + quality * rating_dif * task")
+
+
+
+names_delta = colnames(model.matrix(as.formula(X_deltas[1]), data = df_fastSS))
+names_beta = colnames(model.matrix(as.formula(X_betas[1]), data = df_fastSS))
+names_ndt = colnames(X_tau)
+
+  
+delta_draws <- as_draws_df(fit_LI$draws("gm")) %>% 
+  select(-contains(".")) %>% 
+  rename_with(~c(
+    paste0("alpha_", colnames(X_alpha)),
+    paste0("beta_", names_delta),
+    paste0("delta_", names_delta),
+    paste0("ndt_", names_ndt)
+  )) %>% 
+  select(starts_with("delta_")) %>% 
+  as.matrix()  # dim: [4000 x K]
+
+
+
+X_delta = data.frame(model.matrix(as.formula(X_deltas[1]), data = df_fastSS %>% 
+                                    select(distance_size,quality,task) %>% distinct() %>% 
+                                    mutate(rating_dif = list(c(0,1))) %>% unnest()))
+  
+
+
+b = as.matrix(X_delta) %*% t(delta_draws) 
+
+b_long <- as.data.frame(b) %>%
+  mutate(obs_id = row_number()) %>%
+  pivot_longer(
+    cols = -obs_id,
+    names_to = "draw",
+    values_to = "prediction"
+  )
+
+
+b_long$draw <- as.integer(gsub("V", "", b_long$draw))
+
+
+conditions <- df_fastSS %>%
+  select(distance_size, quality, task) %>%
+  distinct() %>%
+  mutate(rating_dif = list(c(0,1))) %>% unnest() %>% 
+  mutate(obs_id = row_number())
+
+
+li_li_drift = b_long %>%
+  left_join(conditions, by = "obs_id") %>% 
+   filter(rating_dif == 0 & (distance_size == 1 | distance_size == 2)) %>% select(-c(obs_id,rating_dif)) %>% 
+      pivot_wider(names_from = c(quality,distance_size,task), values_from = prediction) %>% 
+  mutate(warm_fast = warm_2_FastLI - warm_1_FastLI,
+         warm_slow = warm_2_SlowLI - warm_1_SlowLI,
+         cold_fast = zcold_2_FastLI - zcold_1_FastLI,
+         cold_slow = zcold_2_SlowLI - zcold_1_SlowLI) %>% 
+  select(warm_fast,warm_slow,cold_fast,cold_slow,draw) %>% 
+  pivot_longer(
+    cols = -draw,
+    names_to = c("stimulus", "task"),
+    names_pattern = "(warm|cold)_(fast|slow)",
+    values_to = "value"
+  ) %>% 
+  ggplot(aes(x = value, fill = stimulus, color = stimulus))+
+    geom_histogram(alpha =0.5, position = "identity")+
+  geom_vline(xintercept = 0, linetype = 2)+
+  scale_fill_manual(values = c('#83a6cd', '#ffb755'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_color_manual(values = c('#5f7ea0', '#cc8f3f'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_x_continuous(
+  breaks = c(-0.2, 0, 0.2),
+  labels = function(x) ifelse(x == 0, "0", format(x, trim = TRUE))) + 
+  SSLI_theme +
+  # facet_wrap(~task,ncol = 1, scales = "free_x")+
+  facet_wrap(~task,ncol = 1)+
+  xlab("Distance (v)")+
+  theme(
+      strip.background = element_blank(),
+      strip.text = element_blank(),
+      panel.spacing = unit(0, "lines"), 
+      strip.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        #axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    )
+
+
+
+
+
+
+
+li_rat_drift = b_long %>%
+  left_join(conditions, by = "obs_id") %>% 
+  filter(distance_size == 1 & (rating_dif == 0 | rating_dif == 1)) %>% select(-c(obs_id,distance_size)) %>% 
+      pivot_wider(names_from = c(quality,rating_dif,task), values_from = prediction) %>% 
+  mutate(warm_fast = warm_1_FastLI - warm_0_FastLI,
+         warm_slow = warm_1_SlowLI - warm_0_SlowLI,
+         cold_fast = zcold_1_FastLI - zcold_0_FastLI,
+         cold_slow = zcold_1_SlowLI - zcold_0_SlowLI) %>% 
+  select(warm_fast,warm_slow,cold_fast,cold_slow,draw) %>% 
+  pivot_longer(
+    cols = -draw,
+    names_to = c("stimulus", "task"),
+    names_pattern = "(warm|cold)_(fast|slow)",
+    values_to = "value"
+  ) %>% 
+  ggplot(aes(x = value, fill = stimulus, color = stimulus))+
+    geom_histogram(alpha =0.5, position = "identity")+
+  geom_vline(xintercept = 0, linetype = 2)+
+  scale_fill_manual(values = c('#83a6cd', '#ffb755'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_color_manual(values = c('#5f7ea0', '#cc8f3f'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_x_continuous(
+  breaks = c(-0.04, 0, 0.04),
+  labels = function(x) ifelse(x == 0, "0", format(x, trim = TRUE))) + 
+  SSLI_theme +
+  # facet_wrap(~task,ncol = 1, scales = "free_x")+
+  facet_wrap(~task,ncol = 1)+
+  xlab("Rating (v)")+
+  theme(
+      strip.background = element_blank(),
+      strip.text = element_blank(),
+      panel.spacing = unit(0, "lines"),
+      strip.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    )
+
+
+
+beta_draws <- as_draws_df(fit_LI$draws("gm")) %>% 
+  select(-contains(".")) %>% 
+  rename_with(~c(
+    paste0("alpha_", colnames(X_alpha)),
+    paste0("beta_", names_beta),
+    paste0("delta_", names_delta),
+    paste0("ndt_", names_ndt)
+  )) %>% 
+  select(starts_with("beta_")) %>% 
+  as.matrix()  # dim: [4000 x K]
+
+
+
+X_beta = data.frame(model.matrix(as.formula(X_betas[1]), data = df_fastSS %>% 
+                                   select(distance_size,quality,task) %>% distinct() %>% 
+                                   mutate(rating_dif = list(c(0,1))) %>% unnest()))
+
+
+
+b = as.matrix(X_beta) %*% t(beta_draws) 
+
+b_long <- as.data.frame(b) %>%
+  mutate(obs_id = row_number()) %>%
+  pivot_longer(
+    cols = -obs_id,
+    names_to = "draw",
+    values_to = "prediction"
+  )
+
+
+b_long$draw <- as.integer(gsub("V", "", b_long$draw))
+
+
+
+conditions <- df_fastSS %>%
+  select(distance_size, quality, task) %>%
+  distinct() %>%
+  mutate(rating_dif = list(c(0,1))) %>% unnest() %>% 
+  mutate(obs_id = row_number())
+
+
+
+li_li_bias = b_long %>%
+  left_join(conditions, by = "obs_id") %>% 
+   filter(rating_dif == 0 & (distance_size == 1 | distance_size == 2)) %>% select(-c(obs_id,rating_dif)) %>% 
+      pivot_wider(names_from = c(quality,distance_size,task), values_from = prediction) %>% 
+  mutate(warm_fast = warm_2_FastLI - warm_1_FastLI,
+         warm_slow = warm_2_SlowLI - warm_1_SlowLI,
+         cold_fast = zcold_2_FastLI - zcold_1_FastLI,
+         cold_slow = zcold_2_SlowLI - zcold_1_SlowLI) %>% 
+  select(warm_fast,warm_slow,cold_fast,cold_slow,draw) %>% 
+  pivot_longer(
+    cols = -draw,
+    names_to = c("stimulus", "task"),
+    names_pattern = "(warm|cold)_(fast|slow)",
+    values_to = "value"
+  ) %>% 
+  ggplot(aes(x = value, fill = stimulus, color = stimulus))+
+    geom_histogram(alpha =0.5, position = "identity")+
+  geom_vline(xintercept = 0, linetype = 2)+
+  scale_fill_manual(values = c('#83a6cd', '#ffb755'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_color_manual(values = c('#5f7ea0', '#cc8f3f'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_x_continuous(
+  breaks = c(-0.2, 0, 0.2),
+  labels = function(x) ifelse(x == 0, "0", format(x, trim = TRUE))) + 
+  SSLI_theme +
+  # facet_wrap(~task,ncol = 1, scales = "free_x")+
+  facet_wrap(~task,ncol = 1)+
+  xlab("Distance (z)")+
+  theme(
+      strip.background = element_blank(),
+      strip.text = element_blank(),
+      panel.spacing = unit(0, "lines"),
+      strip.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank()
+    )
+
+
+
+li_rat_bias = b_long %>%
+  left_join(conditions, by = "obs_id") %>% 
+  filter(distance_size == 1 & (rating_dif == 0 | rating_dif == 1)) %>% select(-c(obs_id,distance_size)) %>% 
+      pivot_wider(names_from = c(quality,rating_dif,task), values_from = prediction) %>% 
+  mutate(warm_fast = warm_1_FastLI - warm_0_FastLI,
+         warm_slow = warm_1_SlowLI - warm_0_SlowLI,
+         cold_fast = zcold_1_FastLI - zcold_0_FastLI,
+         cold_slow = zcold_1_SlowLI - zcold_0_SlowLI) %>% 
+  select(warm_fast,warm_slow,cold_fast,cold_slow,draw) %>% 
+  pivot_longer(
+    cols = -draw,
+    names_to = c("stimulus", "task"),
+    names_pattern = "(warm|cold)_(fast|slow)",
+    values_to = "value"
+  ) %>% 
+  mutate(task = recode(task, fast = "Dynamic", slow = "Target")) %>% 
+  ggplot(aes(x = value, fill = stimulus, color = stimulus))+
+  geom_histogram(alpha =0.5, position = "identity")+
+  geom_vline(xintercept = 0, linetype = 2)+
+  scale_fill_manual(values = c('#83a6cd', '#ffb755'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_color_manual(values = c('#5f7ea0', '#cc8f3f'),
+  name = "Stimulus:",
+  labels = c("Cold","Warm"))+
+  scale_x_continuous(
+  breaks = c(-0.03, 0, 0.03),
+  labels = function(x) ifelse(x == 0, "0", format(x, trim = TRUE))) + 
+  SSLI_theme +
+  # facet_wrap(~task,ncol = 1, scales = "free_x")+
+  facet_grid(task~1, scales = "free_x")+
+  xlab("Rating (z)")+
+  ylab(" ")+
+  theme(strip.text.x = element_blank(),
+        strip.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        axis.ticks.y = element_blank())
+
+
+
+
+
+((li_li_drift + li_rat_drift) | (li_li_bias + li_rat_bias)) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+combined <- ((li_li_drift + li_rat_drift) | (li_li_bias + li_rat_bias)) +
+  plot_layout(guides = "collect") &
+  theme(legend.position = "bottom")
+
+combined <- ((li_li_drift + li_rat_drift) | (li_li_bias + li_rat_bias)) +
+  plot_layout(guides = "collect") &
+  theme(
+    legend.position = "bottom",
+    panel.spacing = unit(0, "lines")  # remove space between panels
+  )
+
+
+left_labels <- textGrob(
+  label = c("Dynamic", "Target"),
+  x = unit(0.7, "npc"),  
+  y = unit(c(0.85, 0.35), "npc"),
+  just = "right",
+  rot = 90,
+  gp = gpar(fontsize = 14, fontface = "bold")
+)
+
+final_plot <- wrap_elements(left_labels) + combined + 
+  plot_layout(ncol = 2, widths = c(0.06, 0.94))  
+
+final_plot
+
+
+
+ggsave(here::here("Figures","png","F6_lateral_inhibition.png"),
+       plot = final_plot,
+       width = 180/25.4,  # inches
+       height = 150/25.4, # inches
+       units = "in",
+       dpi = 600)
+
+ggsave(here::here("Figures","tiff","F6_lateral_inhibition.tiff"),
+       plot = final_plot,
+       width = 180/25.4,  # inches
+       height = 150/25.4, # inches
+       units = "in",
+       dpi = 600)
+
+```

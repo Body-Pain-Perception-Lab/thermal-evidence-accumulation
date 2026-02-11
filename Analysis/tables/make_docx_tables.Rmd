@@ -1,0 +1,109 @@
+---
+title: "Three_way_interactions"
+output:
+  word_document: default
+  html_document: default
+date: "2024-06-21"
+---
+## R Markdown
+
+```{r}
+library(flextable)
+library(tidyverse)
+library(here)
+
+tables <- readRDS(here("Analysis", "tables", "tables.RData"))
+```
+
+```{r}
+tables[[1]]%>% 
+      set_caption(caption = " ") %>%  #this is above the table
+  add_footer_lines("LI rating") #this is below
+
+```
+
+
+
+```{r}
+tables[[3]]%>% 
+      set_caption(caption = " ") %>%  #this is above the table
+  add_footer_lines("LI RT") #this is below
+
+```
+
+```{r}
+tables[[2]]%>% 
+      set_caption(caption = " ") %>%  #this is above the table
+  add_footer_lines("SS rating") #this is below
+
+```
+
+
+```{r}
+tables[[4]]%>% 
+      set_caption(caption = " ") %>%  #this is above the table
+  add_footer_lines("SS RT") #this is below
+
+```
+
+```{r}
+# Define the data
+Model <- c("Dynamic (area size)",
+           "v ~ quality",
+           "v ~ quality + quality:area size",
+           "v ~ quality + quality:area size + quality:VAS rating",
+           "Target (area size)",
+           "v ~ quality",
+           "v ~ quality + quality:area size",
+           "v ~ quality + quality:area size + quality:VAS rating",
+           "Dynamic (distance)",
+           "v ~ quality",
+           "v ~ quality + quality:distance",
+           "v ~ quality + quality:distance + quality:VAS rating",
+           "Target (distance)",
+           "v ~ quality",
+           "v ~ quality + quality:distance",
+           "v ~ quality + quality:distance + quality:VAS rating")
+
+
+DIC <- c(" ",
+         "2132.49", 
+         "1939.97", 
+         "1810.58",
+         " ",
+         "124.429",
+         "76.57",
+         "65.27", 
+         " ",
+         "1181.69",
+         "1180.22",
+         "1023.31",
+         " ",
+         'NA',
+         "-271.30",
+         "-289.44")
+
+Indicator <- c("", "", "", "*", "", "", "", "*", "", "", "", "*", "", "", "", "*")
+
+# Create a dataframe
+Model_DICs <- data.frame(Model, DIC, Indicator)
+
+# Create a flextable
+flextable(Model_DICs) %>%
+  set_header_labels(Model = "Model specification", 
+                    DIC = "Deviance Information Criterion (DIC)", 
+                    Indicator = "") %>%
+  theme_vanilla() %>% 
+  bold(i = c(1, 5, 9, 13), part = "body") %>% 
+  #add_header_row(values = c("Model specification", "Deviance Information Criterion (DIC)", ""),
+                 #colwidths = c(1, 1, 1)) %>%
+  #color(i = c(14), color = "black", part = "body") %>%  # Grey background for row 10
+  bg(i = c(14), bg = "lightgrey", part = "body") %>%
+  autofit()
+
+# Save the table to Word
+#save_as_docx(dic_table, path = here("Tables", "Table_DICs.docx"))
+```
+
+
+

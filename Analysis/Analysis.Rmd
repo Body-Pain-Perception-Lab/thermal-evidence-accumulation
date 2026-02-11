@@ -1,0 +1,324 @@
+---
+title: "Exp1 analysis"
+author: "Camilla Eva Krænge"
+date: "11/28/2023"
+output:
+  pdf_document: default
+  html_document: default
+---
+# Load libraries and functions ß
+```{r setup, include=FALSE}
+# seed
+set.seed(1993)
+
+# Load required packages
+if (!requireNamespace("pacman", quietly = TRUE)) {
+  install.packages("pacman")
+}
+
+library("pacman")
+
+# Define path and data
+p_load(here, readr, tidyverse, dplyr, tidyquant)
+
+# Visualization
+p_load(ggplot2, ggpubr, gghalves, ggrain, cowplot, scales, ggdist, ggthemes, ggblend, PupillometryR, magick,  kableExtra, webshot2)
+
+# Statistics  
+p_load(lmerTest, MuMIn, gamlss, devtools, glmmTMB, DHARMa, ggeffects)
+
+# Load required functions
+#source(here::here("Analysis","functions","effectsize_cohend.R"))
+source(here::here("Analysis","functions","utils.R"))
+```
+
+# Load data
+```{r Load data}
+# load data set
+df <- read_csv(here("Data","exp1.csv"), show_col_types = FALSE)
+
+# Excluded participant (participant 1 was not able to distinguish cold from warm in a vast amount of trials.)
+excluded_participants = list(1)
+
+# Remove excluded trials 
+original_rows <- nrow(df)
+origional_IDs <- length(unique(df$ID))
+df <- df %>%
+  filter(outlier == 0, !ID %in% excluded_participants) %>% 
+  mutate(gender = ifelse(gender == FALSE, "F", gender))
+deleted_rows <- original_rows - nrow(df)
+deleted_IDs <- origional_IDs - length(unique(df$ID))
+
+cat("Number of trials deleted:", deleted_rows, "\n")
+cat("Number of participants deleted:", deleted_IDs, "\n")
+
+# Scaling rating col from between 0 and 100 to fit between 0 and 1 
+df$rating_scaled = df$rating/100
+```
+
+Analyses - Mixed effects models 
+# Spatial Summation
+## Response times 
+```{r}
+#################################### Preparing data #################################### 
+ss_rt <- df %>% filter(task == "FastSS" | task == "SlowSS") %>% 
+                 dplyr::select(ID, size, area_size, quality, trial, trial_rep, rating_scaled, corrected_RT, task) %>% 
+                 drop_na() %>% 
+                 mutate(ID = as.factor(ID),  
+                        quality = as.factor(quality), 
+                        size = as.numeric(size), 
+                        area_size = as.numeric(area_size)) 
+
+#################################### Modelling #################################### 
+# No log model 
+ss_rt_3way <- gamlss(corrected_RT ~ area_size * quality * task + trial + random(ID),
+           sigma.formula = ~ area_size * quality * task + trial + random(ID),
+           data = ss_rt,
+           family = GA(mu.link = "log", sigma.link = "log"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+# Log model 
+ss_rt$quality <- relevel(ss_rt$quality, ref = "warm")
+ss_rt$task <- relevel(as.factor(ss_rt$task), ref = "SlowSS")
+
+ss_rt_3way_log <- gamlss(corrected_RT ~ log(area_size) * quality * task + trial + random(ID),
+           sigma.formula = ~ log(area_size) * quality * task + trial + random(ID),
+           data = ss_rt,
+           family = GA(mu.link = "log", sigma.link = "log"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+#################################### AIC difference #################################### 
+# log model - no log model 
+AIC(ss_rt_3way_log)-AIC(ss_rt_3way)
+
+#################################### Save MEs from winning model #################################### 
+marginaleffects_ss_rt = ggeffects::ggpredict(ss_rt_3way_log, terms = c("area_size","quality","task"))
+
+stat_model_3way_rt = summary_stats_zoib_new(ss_rt_3way_log, coefficients = 9, round = 2, part = "mu")
+
+summary(ss_rt_3way_log)
+formatted_results <- format_model_results(stat_model_3way_rt)
+print(formatted_results)
+#new_table_rt_ss = get_main_tables(ss_rt_3way_log)
+
+```
+
+#coefficient interpretation:
+
+```{r}
+ss_rt$task <- relevel(as.factor(ss_rt$task), ref = "FastSS")
+
+ss_rt_3way_log <- gamlss(corrected_RT ~ log(area_size) * quality * task + trial + random(ID),
+           sigma.formula = ~ log(area_size) * quality * task + trial + random(ID),
+           data = ss_rt,
+           family = GA(mu.link = "log", sigma.link = "log"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+summary = summary(ss_rt_3way_log)
+
+mean = (exp(ss_rt_3way_log$mu.coefficients[2])-1)*100  
+q5 = (exp(ss_rt_3way_log$mu.coefficients[2] - 2 * summary[2,2])-1)*100  
+q95 = (exp(ss_rt_3way_log$mu.coefficients[2] + 2 * summary[2,2])-1)*100  
+
+
+ss_rt$quality <- relevel(ss_rt$quality, ref = "cold")
+ss_rt$task <- relevel(as.factor(ss_rt$task), ref = "FastSS")
+
+ss_rt_3way_log <- gamlss(corrected_RT ~ log(area_size) * quality * task + trial + random(ID),
+           sigma.formula = ~ log(area_size) * quality * task + trial + random(ID),
+           data = ss_rt,
+           family = GA(mu.link = "log", sigma.link = "log"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+summary = summary(ss_rt_3way_log)
+
+mean = (exp(ss_rt_3way_log$mu.coefficients[2])-1)*100  
+q5 = (exp(ss_rt_3way_log$mu.coefficients[2] - 2 * summary[2,2])-1)*100  
+q95 = (exp(ss_rt_3way_log$mu.coefficients[2] + 2 * summary[2,2])-1)*100  
+
+```
+
+```{r}
+ss_rt$task <- relevel(as.factor(ss_rt$task), ref = "SlowSS")
+
+ss_rt_3way_log <- gamlss(corrected_RT ~ log(area_size) * quality * task + trial + random(ID),
+           sigma.formula = ~ log(area_size) * quality * task + trial + random(ID),
+           data = ss_rt,
+           family = GA(mu.link = "log", sigma.link = "log"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+summary = summary(ss_rt_3way_log)
+
+mean = (exp(ss_rt_3way_log$mu.coefficients[2])-1)*100  
+q5 = (exp(ss_rt_3way_log$mu.coefficients[2] - 2 * summary[2,2])-1)*100  
+q95 = (exp(ss_rt_3way_log$mu.coefficients[2] + 2 * summary[2,2])-1)*100  
+
+
+ss_rt$quality <- relevel(ss_rt$quality, ref = "cold")
+ss_rt$task <- relevel(as.factor(ss_rt$task), ref = "SlowSS")
+
+ss_rt_3way_log <- gamlss(corrected_RT ~ log(area_size) * quality * task + trial + random(ID),
+           sigma.formula = ~ log(area_size) * quality * task + trial + random(ID),
+           data = ss_rt,
+           family = GA(mu.link = "log", sigma.link = "log"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+summary = summary(ss_rt_3way_log)
+
+mean = (exp(ss_rt_3way_log$mu.coefficients[2])-1)*100  
+q5 = (exp(ss_rt_3way_log$mu.coefficients[2] - 2 * summary[2,2])-1)*100  
+q95 = (exp(ss_rt_3way_log$mu.coefficients[2] + 2 * summary[2,2])-1)*100  
+
+```
+
+
+## Rating
+```{r}
+#################################### Preparing data #################################### 
+ss_rating <- df %>% filter(task == "FastSS" | task == "SlowSS") %>% 
+                 dplyr::select(ID, size, area_size, quality, trial, trial_rep, rating_scaled, corrected_RT, task) %>% 
+                 drop_na() %>% 
+                 mutate(ID = as.factor(ID),  
+                        quality = as.factor(quality), 
+                        size = as.numeric(size), 
+                        area_size = as.numeric(area_size)) 
+
+#################################### Modelling #################################### 
+# No log model
+ss_rating_3way <- gamlss(rating_scaled ~ task * quality * area_size + task * corrected_RT + trial  +  random(ID),
+           nu.formula = ~ task*quality * area_size + task* corrected_RT + trial  +  random(ID),
+           sigma.formula = ~ task*quality * area_size + task* corrected_RT + trial+  random(ID),
+           data = ss_rating,
+           family = BEINF0(mu.link = "logit", sigma.link = "logit", nu.link = "logit"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+# Log model 
+ss_rating$quality <- relevel(ss_rating$quality, ref = "warm")
+ss_rating$task <- relevel(as.factor(ss_rating$task), ref = "SlowSS")
+
+ss_rating_3way_log <- gamlss(rating_scaled ~ task*quality * log(area_size) + task* corrected_RT + trial  +  random(ID),
+           nu.formula = ~ task*quality * log(area_size) + task* corrected_RT + trial  +  random(ID),
+           sigma.formula = ~ task*quality * log(area_size) + task* corrected_RT + trial+  random(ID),
+           data = ss_rating,
+           family = BEINF0(mu.link = "logit", sigma.link = "logit", nu.link = "logit"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+#################################### AIC difference #################################### 
+# log model - no log model 
+AIC(ss_rating_3way_log)-AIC(ss_rating_3way)
+
+#################################### Save MEs from winning model #################################### 
+marginaleffects_ss_rating = ggeffects::ggpredict(ss_rating_3way_log, terms = c("area_size","quality","task"))
+
+stat_model_3way_rating = summary_stats_zoib_new(ss_rating_3way_log, coefficients = 11, round = 2, part = "mu")
+summary(ss_rating_3way_log)
+
+formatted_results <- format_model_results(stat_model_3way_rating)
+print(formatted_results)
+#new_table_rating_ss = get_main_tables(ss_rating_3way_log)
+
+```
+
+# Lateral inhibition 
+## Response times
+```{r}
+#################################### Preparing data #################################### 
+ss_fast_rt <- df %>% filter(task == "FastLI" | task == "SlowLI") %>% 
+                 dplyr::select(ID, size, distance_size, quality, trial, trial_rep, rating_scaled, corrected_RT, task) %>% 
+                 drop_na() %>% 
+                 mutate(ID = as.factor(ID),  
+                        quality = as.factor(quality), 
+                        size = as.numeric(size), 
+                        distance_size = as.numeric(distance_size))
+
+
+#################################### Modelling #################################### 
+# No log model 
+ss_fast_rt$quality <- relevel(ss_fast_rt$quality, ref = "warm")
+ss_fast_rt$task <- relevel(as.factor(ss_fast_rt$task), ref = "SlowLI")
+ss_rt_3way_li <- gamlss(corrected_RT ~ distance_size * quality * task + trial + random(ID),
+           nu.formula = ~ distance_size * quality * task + trial + random(ID),
+           sigma.formula = ~ distance_size * quality * task + trial + random(ID),
+           data = ss_fast_rt,
+           family = GA(mu.link = "log", sigma.link = "log"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+# Log model 
+ss_rt_3way_li_log <- gamlss(corrected_RT ~ log(distance_size+1) * quality * task + trial + random(ID),
+           nu.formula = ~ distance_size * quality * task + trial + random(ID),
+           sigma.formula = ~ distance_size * quality * task + trial + random(ID),
+           data = ss_fast_rt,
+           family = GA(mu.link = "log", sigma.link = "log"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+#################################### AIC difference #################################### 
+# log model - no log model 
+AIC(ss_rt_3way_li_log)-AIC(ss_rt_3way_li)
+
+#################################### Save MEs from winning model #################################### 
+marginaleffects_li_rt = ggeffects::ggpredict(ss_rt_3way_li, terms = c("distance_size","quality","task"))
+
+stat_model_3way_rt = summary_stats_zoib_new(ss_rt_3way_li, coefficients =9, round = 2, part = "mu")
+
+summary(ss_rt_3way_li)
+
+formatted_results <- format_model_results(stat_model_3way_rt)
+formatted_results
+#new_table_rt_li = get_main_tables(ss_rt_3way_li)
+```
+
+## Rating
+```{r}
+#################################### Preparing data #################################### 
+ss_rating <- df %>% filter(task == "FastLI" | task == "SlowLI") %>% 
+                 dplyr::select(ID, size, distance_size, quality, trial, trial_rep, rating_scaled, corrected_RT, task) %>% 
+                 drop_na() %>% 
+                 mutate(ID = as.factor(ID),  
+                        quality = as.factor(quality), 
+                        size = as.numeric(size), 
+                        distance_size = as.numeric(distance_size)) %>% filter(rating_scaled != 1)
+
+#################################### Modelling #################################### 
+# No log model 
+ss_rating$quality <- relevel(ss_rating$quality, ref = "warm")
+ss_rating$task <- relevel(as.factor(ss_rating$task), ref = "SlowLI")
+ss_rating_3way_li <- gamlss(rating_scaled ~ task*quality * distance_size + task* corrected_RT + trial  +  random(ID),
+           nu.formula = ~ task*quality * distance_size + task* corrected_RT + trial  +  random(ID),
+           sigma.formula = ~ task*quality * distance_size + task* corrected_RT + trial+  random(ID),
+           data = ss_rating,
+           family = BEINF0(mu.link = "logit", sigma.link = "logit", nu.link = "logit"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+# Log model 
+ss_rating_3way_li_log <- gamlss(rating_scaled ~ task*quality * log(distance_size+1) + task* corrected_RT + trial  +  random(ID),
+           nu.formula = ~ task*quality * distance_size + task* corrected_RT + trial  +  random(ID),
+           sigma.formula = ~ task*quality * distance_size + task* corrected_RT + trial+  random(ID),
+           data = ss_rating,
+           family = BEINF0(mu.link = "logit", sigma.link = "logit", nu.link = "logit"),
+           control = gamlss.control(n.cyc = 100, trace = T))
+
+#################################### AIC difference #################################### 
+# log model - no log model 
+AIC(ss_rating_3way_li_log)-AIC(ss_rating_3way_li)
+
+#################################### Save MEs from winning model #################################### 
+marginaleffects_li_rating = ggeffects::ggpredict(ss_rating_3way_li, terms = c("distance_size","quality","task"))
+
+stat_model_3way_rt = summary_stats_zoib_new(ss_rating_3way_li, coefficients = 11, round = 2, part = "mu")
+
+summary(ss_rating_3way_li)
+
+formatted_results <- format_model_results(stat_model_3way_rt)
+print(formatted_results)
+#new_table_rating_li = get_main_tables(ss_rating_3way_li)
+```
+
+
+# save workspace:
+
+```{r}
+
+save(list = variables, file = here::here("Analysis","Workspaces","Analysis.RData"))
+
+```
+

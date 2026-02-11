@@ -1,0 +1,416 @@
+---
+title: "plots"
+author: "Camilla Eva Krænge"
+date: "1/23/2025"
+output: html_document
+---
+# Load utils
+```{r}
+# load libraries 
+library(ggplot2)
+library(here)
+library(ggeffects)
+library(tidyverse)
+library(cowplot)
+
+# load functions
+source(here("Analysis","functions","utils.R"))
+
+# load model results
+load(here("Analysis", "Workspaces", "Analysis.RData"))
+```
+
+# Custom plot theme 
+```{r Custom plot theme, include=FALSE}
+# Define common aesthetic settings
+SSLI_theme <- theme_classic() + 
+  theme(
+    text = element_text(size = 12), 
+    legend.position = "none",
+    axis.line = element_line(size = 1), 
+    axis.text = element_text(size = 12),
+    axis.title = element_text(size = 12),
+    plot.title = element_text(size = 12, face = "bold"),
+    panel.grid = element_blank(),
+    plot.background = element_rect(fill = "#FFFFFF", color = NA),
+    panel.background = element_rect(fill = "#FFFFFF", color = NA),
+    strip.background = element_rect(fill = "#FFFFFF", color = "#FFFFFF"), # White background and outline
+    strip.text = element_text(size = 12, face = "bold") # Optional, customize facet text
+  )
+
+#define plot colors 
+colors <- c("#83a6cd","#ffb755")
+```
+
+# Plot raw data and model predictions 
+```{r}
+plot_raw_predictions <- function(data, task, y, x, predict_data, x_title, y_title, colors) {
+  data %>%
+    ggplot() +
+    # Warm boxplot
+    geom_boxplot(
+      aes(x = as.factor(.data[[x]]), y = .data[[y]], fill = quality, col = quality),
+      width = 0.3,
+      position = position_nudge(x = 0),
+      outlier.shape = NA,
+      alpha = 0.6
+    ) +
+    # Cold points
+    geom_point(
+      aes(x = as.factor(.data[[x]]), y = .data[[y]], fill = quality, col = quality),
+      position = position_nudge(x = 0),
+      alpha = 0.3
+    ) +
+    # Lines connecting points
+    geom_line(
+      aes(x = as.factor(.data[[x]]), y = .data[[y]], fill = quality, col = quality, group = ID),
+      alpha = 0.2
+    ) +
+    # Predicted lines and ribbons
+    geom_line(
+      data = predict_data,
+      aes(x = .data[[x]], y = predicted, group = interaction(quality, task), col = quality),
+      linewidth = 1
+    ) +
+    geom_ribbon(
+      data = predict_data,
+      aes(x = .data[[x]], ymin = conf.low, ymax = conf.high, group = interaction(quality, task), fill = quality),
+      alpha = 0.75
+    ) +
+    # Custom colors
+    scale_colour_manual(values = colors) +
+    scale_fill_manual(values = colors) +
+    # Facet vertically
+    facet_grid(~quality) +
+    # Titles and theme
+    labs(x = x_title, y = y_title) +
+    SSLI_theme +
+    theme(strip.text = element_blank()) # Remove facet titles
+}
+```
+
+# spatial summation 
+### prepare raw data 
+```{r}
+ss <- df %>% filter(task == "FastSS" | task == "SlowSS") %>% 
+                 dplyr::select(ID, size, area_size, quality, trial, trial_rep, rating_scaled, corrected_RT, task) %>% 
+                 drop_na() %>% 
+                 mutate(ID = as.factor(ID),  
+                        quality = as.factor(quality), 
+                        size = as.numeric(size), 
+                        area_size = as.numeric(area_size)) 
+
+
+# remove 0s and 1s to plot only mu 
+ss <- ss %>% filter(rating_scaled != 0, rating_scaled != 1) 
+
+# scale ratings and summarize data 
+ss_plot_sum = ss %>% 
+  group_by(ID, quality, area_size,task) %>% 
+  summarise(rating = median(rating_scaled)*100, rt = median(corrected_RT))
+```
+## ratings 
+### prepare predicted data 
+```{r}
+predict_ss_rating = data.frame(marginaleffects_ss_rating) %>% rename(task = facet, quality = group, area_size = x) %>% 
+  mutate(ID = 0, area_size = as.factor(area_size), 
+         predicted = predicted * 100, 
+         conf.low = conf.low * 100, 
+         conf.high = conf.high * 100)
+```
+### plots 
+```{r}
+fast_ss_rating <- plot_raw_predictions(
+  data = filter(ss_plot_sum, task == "FastSS") ,
+  task = "FastSS",
+  y = "rating",
+  x = "area_size",
+  predict_data = filter(predict_ss_rating, task == "FastSS"),
+  x_title = "Area",
+  y_title = "Rating",
+  colors = colors
+)
+
+slow_ss_rating <- plot_raw_predictions(
+  data = filter(ss_plot_sum, task == "SlowSS") ,
+  'SlowSS', 
+  "rating", 
+  "area_size",
+  filter(predict_ss_rating, task == 'SlowSS'), 
+  "Area", 
+  " ", 
+  colors)
+
+fast_ss_rating
+slow_ss_rating
+```
+
+## response times
+### prepare predicted data 
+```{r}
+predict_ss_rt = data.frame(marginaleffects_ss_rt) %>% rename(task = facet, quality = group, area_size = x) %>% 
+  mutate(ID = 0, area_size = as.factor(area_size))
+```
+### plots 
+```{r}
+fast_ss_rt <- plot_raw_predictions(
+  data = filter(ss_plot_sum, task == "FastSS") ,
+  'FastSS', 
+  "rt", 
+  "area_size",
+  filter(predict_ss_rt, task == 'FastSS'), 
+  "", 
+  "RT", 
+  colors)
+
+slow_ss_rt <- plot_raw_predictions(
+  data = filter(ss_plot_sum, task == "SlowSS") ,
+  'SlowSS', 
+  "rt", 
+  "area_size",
+  filter(predict_ss_rt, task == 'SlowSS'), 
+  "", 
+  "", 
+  colors)
+
+fast_ss_rt
+slow_ss_rt
+```
+
+
+# lateral inhibition 
+### prepare raw data 
+```{r}
+li <- df %>% filter(task == "FastLI" | task == "SlowLI") %>% 
+                 dplyr::select(ID, size, distance_size, quality, trial, trial_rep, rating_scaled, corrected_RT, task) %>% 
+                 drop_na() %>% 
+                 mutate(ID = as.factor(ID),  
+                        quality = as.factor(quality), 
+                        size = as.numeric(size), 
+                        distance_size = as.numeric(distance_size)) 
+
+
+# remove 0s and 1s to plot only mu 
+li <- li %>% filter(rating_scaled != 0, rating_scaled != 1) 
+
+# scale ratings and summarize data 
+li_plot_sum = li %>% 
+  group_by(ID, quality, distance_size, task) %>% 
+  summarise(rating = median(rating_scaled)*100, rt = median(corrected_RT))
+```
+### prepare predicted data 
+```{r}
+predict_li_rating = data.frame(marginaleffects_li_rating) %>% rename(task = facet, quality = group, distance_size = x) %>% 
+  mutate(ID = 0, distance_size = as.factor(distance_size), 
+         predicted = predicted * 100, 
+         conf.low = conf.low * 100, 
+         conf.high = conf.high * 100)
+```
+### plots 
+```{r}
+fast_li_rating = plot_raw_predictions(
+  filter(li_plot_sum, task == 'FastLI'),
+  'FastLI', 
+  "rating", 
+  "distance_size", 
+  filter(predict_li_rating, task == 'FastLI'), 
+  "Distance", 
+  "Rating", 
+  colors)
+
+slow_li_rating = plot_raw_predictions(
+  filter(li_plot_sum, task == 'SlowLI'),
+  'SlowLI', 
+  "rating", 
+  "distance_size", 
+  filter(predict_li_rating, task == 'SlowLI'), 
+  "Distance", 
+  "", 
+  colors)
+
+fast_li_rating
+slow_li_rating
+```
+
+## response times
+### prepare predicted data 
+```{r}
+predict_li_rt = data.frame(marginaleffects_li_rt) %>% rename(task = facet, quality = group, distance_size = x) %>% 
+  mutate(ID = 0, distance_size = as.factor(distance_size))
+```
+### plots 
+```{r}
+fast_li_rt = plot_raw_predictions(
+  filter(li_plot_sum, task == 'FastLI'),
+  'FastLI', 
+  "rt", 
+  "distance_size", 
+  filter(predict_li_rt, task == 'FastLI'), 
+  "", 
+  "RT", 
+  colors)
+
+slow_li_rt = plot_raw_predictions(
+  filter(li_plot_sum, task == 'SlowLI'),
+  'SlowLI', 
+  "rt", 
+  "distance_size",
+  filter(predict_li_rt, task == 'SlowLI'), 
+  "", 
+  "", 
+  colors)
+
+fast_li_rt
+slow_li_rt
+```
+
+# Gather plots 
+## Legend 
+```{r}
+# Create a dummy plot to extract the legend
+dummy_plot <- ggplot() +
+  geom_point(aes(x = 1, y = 1, color = "ffb755"), size = 5) +
+  geom_point(aes(x = 2, y = 1, color = "83a6cd"), size = 5) +
+  scale_color_manual(
+    values = c("83a6cd" = "#83a6cd", "003366" = "#003366",
+               "ffb755" = "#ffb755", "cc6600" = "#cc6600"),
+    labels = c("Cold","Warm"),
+    breaks = c("83a6cd","ffb755")
+  ) +
+  guides(
+    color = guide_legend(
+      title = "                    Stimulus:",  # Set the legend title
+      override.aes = list(size = 5),  # Adjust the size of the points in the legend
+      ncol = 4,                       # Ensure the legend items are in one row
+      byrow = TRUE                    # Ensure the items are arranged by row
+    )
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.text = element_text(size = 12),
+    legend.title = element_text(size = 12)
+
+  )
+
+# Extract only the legend
+shared_legend <- cowplot::get_plot_component(dummy_plot, "guide-box", return_all = TRUE)[[3]]
+
+```
+
+## Spatial summation 
+```{r}
+# Create title labels as individual plots
+dynamic_title <- ggdraw() + 
+  draw_label("Dynamic", hjust = 0.5, vjust = 0.5, size = 12, fontface = "bold")
+
+target_title <- ggdraw() + 
+  draw_label("Target", hjust = 0.5, vjust = 0.5, size = 12, fontface = "bold")
+
+
+SS_results <- plot_grid(
+  plot_grid(fast_ss_rt, slow_ss_rt, nrow = 1, align = "v"),  # Top row (RT plots)
+  plot_grid(fast_ss_rating, slow_ss_rating, nrow = 1, align = "v"),  # Bottom row (Rating plots)
+  shared_legend,  # Add the shared legend
+  ncol = 1,  # Arrange rows vertically
+  rel_heights = c(1, 1, 0.1)  # Adjust heights (legend typically smaller)
+)
+
+SS_results_with_titles <- plot_grid(
+  plot_grid(dynamic_title, target_title, nrow = 1, rel_widths = c(1, 1)), # Title row
+  plot_grid(
+    plot_grid(fast_ss_rt, slow_ss_rt, nrow = 1, align = "v"),  # Top row (RT plots)
+    plot_grid(fast_ss_rating, slow_ss_rating, nrow = 1, align = "v"),  # Bottom row (Rating plots)
+    shared_legend,  # Add the shared legend
+    ncol = 1,  # Arrange rows vertically
+    rel_heights = c(1, 1, 0.1)  # Adjust heights
+  ),
+  ncol = 1,
+  rel_heights = c(0.1, 1)  # Adjust relative height of titles and plots
+)
+
+# Add "a", "b", "c", "d" labels
+final_plot_SS <- ggdraw(SS_results_with_titles) +
+  draw_label("A", x = 0.01, y = 0.92, hjust = 0, vjust = 1, size = 12, fontface = "bold") +
+  draw_label("B", x = 0.51, y = 0.92, hjust = 0, vjust = 1, size = 12, fontface = "bold") +
+  draw_label("C", x = 0.01, y = 0.52, hjust = 0, vjust = 1, size = 12, fontface = "bold") +
+  draw_label("D", x = 0.51, y = 0.52, hjust = 0, vjust = 1, size = 12, fontface = "bold")
+
+
+ggsave(
+  filename = here("Figures","png", "F3_SS_Raw_Pred.PNG"),  
+  plot = final_plot_SS,      
+  width = 7,              # Width in inches
+  height = 6,              # Height in inches
+  dpi = 600                # Resolution (DPI)
+)
+
+ggsave(
+  filename = here("Figures","tiff", "F3_SS_Raw_Pred.tiff"),  
+  plot = final_plot_SS,      
+  width = 7,              # Width in inches
+  height = 6,              # Height in inches
+  dpi = 600                # Resolution (DPI)
+)
+```
+
+## Lateral inhibition 
+```{r}
+# Create title labels as individual plots
+dynamic_title <- ggdraw() + 
+  draw_label("Dynamic", hjust = 0.5, vjust = 0.5, size = 12, fontface = "bold")
+
+target_title <- ggdraw() + 
+  draw_label("Target", hjust = 0.5, vjust = 0.5, size = 12, fontface = "bold")
+
+
+LI_results <- plot_grid(
+  plot_grid(fast_li_rt, slow_li_rt, nrow = 1, align = "v"),  # Top row (RT plots)
+  plot_grid(fast_li_rating, slow_li_rating, nrow = 1, align = "v"),  # Bottom row (Rating plots)
+  shared_legend,  # Add the shared legend
+  ncol = 1,  # Arrange rows vertically
+  rel_heights = c(1, 1, 0.1)  # Adjust heights (legend typically smaller)
+)
+
+
+LI_results_with_titles <- plot_grid(
+  plot_grid(dynamic_title, target_title, nrow = 1, rel_widths = c(1, 1)), # Title row
+  plot_grid(
+    plot_grid(fast_li_rt, slow_li_rt, nrow = 1, align = "v"),  # Top row (RT plots)
+    plot_grid(fast_li_rating, slow_li_rating, nrow = 1, align = "v"),  # Bottom row (Rating plots)
+    shared_legend,  # Add the shared legend
+    ncol = 1,  # Arrange rows vertically
+    rel_heights = c(1, 1, 0.1)  # Adjust heights
+  ),
+  ncol = 1,
+  rel_heights = c(0.1, 1)  # Adjust relative height of titles and plots
+)
+
+# Add "a", "b", "c", "d" labels
+final_plot_LI <- ggdraw(LI_results_with_titles) +
+  draw_label("A", x = 0.01, y = 0.92, hjust = 0, vjust = 1, size = 12, fontface = "bold") +
+  draw_label("B", x = 0.51, y = 0.92, hjust = 0, vjust = 1, size = 12, fontface = "bold") +
+  draw_label("C", x = 0.01, y = 0.52, hjust = 0, vjust = 1, size = 12, fontface = "bold") +
+  draw_label("D", x = 0.51, y = 0.52, hjust = 0, vjust = 1, size = 12, fontface = "bold")
+
+ggsave(
+  filename = here("Figures","png", "F4_LI_Raw_Pred.PNG"),  
+  plot = final_plot_LI,       
+  width = 7,              # Width in inches
+  height = 6,              # Height in inches
+  dpi = 600                # Resolution (DPI)
+)
+
+
+ggsave(
+  filename = here("Figures","tiff", "F4_LI_Raw_Pred.tiff"),  
+  plot = final_plot_LI,       
+  width = 7,              # Width in inches
+  height = 6,              # Height in inches
+  dpi = 600                # Resolution (DPI)
+)
+```
+
+
+
+
