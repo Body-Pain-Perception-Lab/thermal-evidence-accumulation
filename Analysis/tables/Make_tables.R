@@ -21,13 +21,8 @@ p_load(lmerTest, MuMIn, gamlss, devtools, glmmTMB, DHARMa, ggeffects)
 
 
 # Load required functions
-source(here::here("Analysis","functions","effectsize_cohend.R"))
-source(here::here("Analysis","functions","utils_Jesper.R"))
 source(here::here("Analysis","functions","load_data.R"))
-
-
 source(here::here("Analysis","tables","make_supplementary_table.R"))
-## R Markdown
 
 
 ## Load data
